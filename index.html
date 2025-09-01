@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>DJ Track Analyzer</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 40px; }
+    h1 { color: #333; }
+    #report { margin-top: 20px; padding: 15px; border: 1px solid #ccc; border-radius: 5px; background: #f9f9f9; }
+    label { margin-right: 10px; }
+  </style>
+</head>
+<body>
+  <h1>DJ Track Analyzer</h1>
+
+  <input type="file" id="file" accept=".wav,.mp3,.aiff,.flac"/>
+  <label for="mode">Mode:</label>
+  <select id="mode">
+    <option value="dj">DJ Mix Ready</option>
+    <option value="streaming">Streaming Ready</option>
+  </select>
+  <button id="btn">Analyze</button>
+
+  <div id="report"></div>
+
+  <script>
+    document.getElementById("btn").onclick = async () => {
+      const f = document.getElementById("file").files[0];
+      const mode = document.getElementById("mode").value;
+      if (!f) {
+        alert("Please select a file.");
+        return;
+      }
+
+      const fd = new FormData();
+      fd.append("file", f);
+      fd.append("mode", mode);
+
+      const res = await fetch("/analyze", { method: "POST", body: fd });
+      const data = await res.json();
+
+      if (data.error) {
+        document.getElementById("report").innerText = "Error: " + data.error;
+        return;
+      }
+
+      const r = data.result;
+      const mins = Math.floor(r.duration_sec / 60);
+      const secs = Math.round(r.duration_sec % 60);
+
+      document.getElementById("report").innerHTML = `
+        <h2>Analysis Report</h2>
+        <p><b>File:</b> ${data.file}</p>
+        <p><b>Mode:</b> ${data.mode === "dj" ? "DJ Mix Ready" : "Streaming Ready"}</p>
+        <p><b>Length:</b> ${mins} min ${secs} sec</p>
+        <p><b>Tempo:</b> ${r.tempo_bpm} BPM</p>
+        <p><b>Loudness:</b> ${r.loudness_lufs} LUFS</p>
+        <p><b>Peak:</b> ${r.peak_dbfs} dBFS</p>
+        <p><b>Notes:</b></p>
+        <ul>${r.dj_notes.map(n => `<li>${n}</li>`).join("")}</ul>
+      `;
+    };
+  </script>
+</body>
+</html>
