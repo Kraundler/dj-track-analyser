@@ -6,9 +6,12 @@ import pyloudnorm as pyln
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse, Response
 
-app = FastAPI(title="DJ Track Analyzer", version="0.5")
+# -------------------- Paths / App --------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INDEX_PATH = os.path.join(BASE_DIR, "index.html")
 
-EXAMPLES_DIR = "examples"
+app = FastAPI(title="DJ Track Analyzer", version="0.5")
+EXAMPLES_DIR = os.path.join(BASE_DIR, "examples")
 
 # ====== Beats/targets ======
 GREEN_TARGET_BEATS = 192                 # perfect beats-to-break target
@@ -36,11 +39,15 @@ def apple_icon_pre():
 def favicon():
     return Response(status_code=204)
 
+@app.get("/ping")
+def ping():
+    return {"ok": True}
+
 # ===================== Utilities =====================
 
 def load_audio_mono(path, target_sr=22050):
-    """Downsampled mono load for faster analysis."""
-    y, sr = librosa.load(path, sr=target_sr, mono=True, res_type="kaiser_fast")
+    """Downsampled mono load for faster analysis, using SciPy resampler (no extra deps)."""
+    y, sr = librosa.load(path, sr=target_sr, mono=True, res_type="scipy")
     return y, sr
 
 def robust_tempo(y: np.ndarray, sr: int):
@@ -54,7 +61,6 @@ def robust_tempo(y: np.ndarray, sr: int):
     def fit_range(bpm: float, lo: float, hi: float) -> float:
         if bpm <= 0:
             return 0.0
-        # Move by factors of 2 until inside [lo, hi]
         while not (lo <= bpm <= hi):
             bpm = bpm * 2.0 if bpm < lo else bpm / 2.0
         return bpm
@@ -81,7 +87,6 @@ def robust_tempo(y: np.ndarray, sr: int):
     if not cands_all:
         return 0.0, 0.0
 
-    # Generate half/double variants and fold into range
     corrected = []
     for t in cands_all:
         for mult in (0.25, 0.5, 1.0, 2.0, 4.0):
@@ -90,8 +95,7 @@ def robust_tempo(y: np.ndarray, sr: int):
                 corrected.append(bpm)
 
     if not corrected:
-        t0 = fit_range(float(cands_all[0]), min_bpm, max_bpm)
-        corrected = [t0]
+        corrected = [fit_range(float(cands_all[0]), min_bpm, max_bpm)]
 
     bpm = float(np.median(corrected))
     bpm = round(bpm * 2.0) / 2.0   # round to 0.5 BPM for stability
@@ -128,13 +132,11 @@ def refine_tempo_and_phase(y, sr, rough_bpm):
         return float(rough_bpm), 0.0
     times = librosa.frames_to_time(np.arange(len(oenv)), sr=sr, hop_length=hop)
 
-    # score only the first 120s to avoid outro bias
     max_t = 120.0
     limit = min(len(times)-1, int(np.searchsorted(times, max_t)))
     if limit < 16:
         return float(rough_bpm), 0.0
 
-    # Wider window around rough BPM
     bpm_lo = max(110.0, float(rough_bpm) - 12.0)
     bpm_hi = min(190.0, float(rough_bpm) + 12.0)
     bpm_cands = np.linspace(bpm_lo, bpm_hi, 31)
@@ -142,7 +144,6 @@ def refine_tempo_and_phase(y, sr, rough_bpm):
     best_bpm, best_phase, best_score = float(rough_bpm), 0.0, -1.0
     for bpm in bpm_cands:
         spb = 60.0 / bpm
-        # 32 phase tests across one beat
         for k in range(32):
             t0 = (k / 32.0) * spb
             grid = t0 + np.arange(0.0, times[limit], spb)
@@ -166,7 +167,6 @@ def detect_intro_outro(y, sr, bpm, y_harm=None, y_perc=None):
     if bpm <= 0 or duration < 30:
         return 0.0, max(0.0, duration - 30.0)
 
-    # Beat track
     hop = 512
     oenv = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
     _, beat_frames = librosa.beat.beat_track(y=y, sr=sr, onset_envelope=oenv, hop_length=hop)
@@ -174,9 +174,8 @@ def detect_intro_outro(y, sr, bpm, y_harm=None, y_perc=None):
         return detect_intro_outro_rms_fallback(y, sr)
 
     beat_times = librosa.frames_to_time(beat_frames, sr=sr, hop_length=hop)
-    beat_times = np.append(beat_times, duration)  # safe end boundary
+    beat_times = np.append(beat_times, duration)
 
-    # HPSS (use precomputed if provided)
     if y_harm is None or y_perc is None:
         y_harm, y_perc = librosa.effects.hpss(y)
 
@@ -188,7 +187,6 @@ def detect_intro_outro(y, sr, bpm, y_harm=None, y_perc=None):
         seg = sig[s0:s1]
         return float(np.sqrt(np.mean(seg * seg) + 1e-12))
 
-    # Per-beat harmonic/percussive RMS
     harm_rms = []
     perc_rms = []
     for i in range(len(beat_times) - 1):
@@ -200,13 +198,11 @@ def detect_intro_outro(y, sr, bpm, y_harm=None, y_perc=None):
 
     ratio_beats = harm_rms / (perc_rms + 1e-8)
 
-    # Aggregate by bars (4 beats)
     nb = len(ratio_beats) // 4
     if nb < 8:
         return detect_intro_outro_rms_fallback(y, sr)
     ratio_bars = ratio_beats[:nb * 4].reshape(nb, 4).mean(axis=1)
 
-    # Baselines / thresholds
     start_win = min(8, nb // 4) or 4
     end_win = min(8, nb // 4) or 4
     start_base = float(np.median(ratio_bars[:start_win]))
@@ -216,9 +212,8 @@ def detect_intro_outro(y, sr, bpm, y_harm=None, y_perc=None):
 
     thr_intro_high = max(start_base + 0.15, r_p70 * 0.85, 0.45)
     thr_outro_low  = min(end_base + 0.10, r_p30 * 1.05, 0.50)
-    sustain_bars = 2  # require 2 bars of evidence
+    sustain_bars = 2
 
-    # Intro end
     intro_end_bar = 0
     run = 0
     search_end = min(nb, 64)
@@ -231,7 +226,6 @@ def detect_intro_outro(y, sr, bpm, y_harm=None, y_perc=None):
         else:
             run = 0
 
-    # Outro start
     outro_start_bar = nb - 1
     run = 0
     search_start = max(0, nb - 64)
@@ -251,13 +245,11 @@ def detect_intro_outro(y, sr, bpm, y_harm=None, y_perc=None):
     intro_end_sec = bar_to_time(intro_end_bar)
     outro_start_sec = bar_to_time(outro_start_bar)
 
-    # clamps
     intro_end_sec = max(0.0, min(intro_end_sec, duration))
     outro_start_sec = max(0.0, min(outro_start_sec, duration))
     return intro_end_sec, outro_start_sec
 
 def detect_intro_outro_rms_fallback(y, sr):
-    # very basic fallback if beat tracking fails
     duration = len(y) / sr
     return min(32.0, duration * 0.25), max(0.0, duration - 32.0)
 
@@ -283,7 +275,6 @@ def analyze_example_file(path):
     )
 
 def build_examples_summary():
-    """Scan examples/, analyze, and derive target intro/outro in bars (median)."""
     files = []
     if os.path.isdir(EXAMPLES_DIR):
         for ext in ("*.wav", "*.mp3", "*.aiff", "*.flac"):
@@ -321,7 +312,6 @@ def build_examples_summary():
     }
 
 def get_examples_summary():
-    """Simple cache: rebuild if folder mtimes changed."""
     global _examples_cache
     mtimes = {}
     if os.path.isdir(EXAMPLES_DIR):
@@ -374,12 +364,11 @@ def analyze_track(path: str):
     intro_verdict = verdict(intro_bars, tgt_intro)
     outro_verdict = verdict(outro_bars, tgt_outro)
 
-    # ====== First-break detection (grid-anchored, ≥15s, drum pullback, earliest phrase) ======
+    # ====== First-break detection ======
     beats_before_break = None
     break_time_sec = None
     try:
         if tempo_bpm > 0:
-            # Use refined grid (BPM + phase) so counting is exact
             spb = 60.0 / float(tempo_bpm)
 
             def seg_rms_db(sig, t0, t1):
@@ -391,18 +380,16 @@ def analyze_track(path: str):
                 rms = np.sqrt(float(np.mean(seg * seg)) + 1e-12)
                 return 20.0 * np.log10(rms + 1e-12)
 
-            # Tunables
             PHRASE_BEATS   = 32
-            PREV_BEATS     = 16        # baseline window before candidate
-            MIN_BREAK_SEC  = 15.0      # break must sustain ≥15s
-            DROP_DB        = 5.0       # overall energy drop (was 5.5)
-            PERC_DROP_DB   = 4.0       # percussive drop (was 4.5)
-            TIME_MIN_SEC   = 20.0      # allow earlier breaks
-            TIME_MAX_SEC   = min(180.0, duration * 0.7)  # dynamic upper bound
+            PREV_BEATS     = 16
+            MIN_BREAK_SEC  = 15.0
+            DROP_DB        = 5.0
+            PERC_DROP_DB   = 4.0
+            TIME_MIN_SEC   = 20.0
+            TIME_MAX_SEC   = min(180.0, duration * 0.7)
 
-            # Build candidate phrase starts on the refined grid, earliest first
             candidates = []
-            b = PHRASE_BEATS * 2  # start at 64 beats
+            b = PHRASE_BEATS * 2  # 64, then +32...
             while True:
                 t = beat_phase_sec + b * spb
                 if t > duration:
@@ -411,9 +398,8 @@ def analyze_track(path: str):
                     candidates.append((b, t))
                 elif t > TIME_MAX_SEC:
                     break
-                b += PHRASE_BEATS  # 32-beat phrases: 64, 96, 128, 160, 192, ...
+                b += PHRASE_BEATS
 
-            # Evaluate candidates; pick the FIRST that passes
             for beats, t_start in candidates:
                 prev_t0 = max(0.0, t_start - PREV_BEATS * spb)
                 prev_t1 = t_start
@@ -434,14 +420,11 @@ def analyze_track(path: str):
 
     beats_to_break_status = _beats_to_break_status(beats_before_break, GREEN_TARGET_BEATS)
 
-    # --- Override intro length to match the green selection: start → (break - 64 beats)
-    # If we detected the first break, define intro as (beats_before_break - 64) beats.
+    # Override intro to match (break - 64 beats)
     if beats_before_break is not None and tempo_bpm > 0:
         WHITE_BEATS = 64
         intro_bars = round(max(0, beats_before_break - WHITE_BEATS) / 4.0, 1)
-        # Recompute verdict for the new intro length
         intro_verdict = verdict(intro_bars, tgt_intro)
-    # ==========================================================================================
 
     notes = []
     if duration < 150:
@@ -457,17 +440,14 @@ def analyze_track(path: str):
         "file": os.path.basename(path),
         "duration_sec": round(duration, 2),
 
-        # Tempo / levels
         "tempo_bpm": round(tempo_bpm, 1),
         "tempo_confidence": round(tempo_conf * 100, 1),
         "loudness_lufs": round(loudness, 2),
         "peak_dbfs": round(peak_dbfs, 2),
 
-        # Section times for overlays (from HPSS detector)
         "intro_end_sec": round(float(intro_end_sec), 2),
         "outro_start_sec": round(float(outro_start_sec), 2),
 
-        # Lengths (intro possibly overridden above)
         "intro_bars": round(float(intro_bars), 1) if tempo_bpm > 0 else None,
         "intro_beats": int(round(float(intro_bars * 4))) if tempo_bpm > 0 else None,
         "intro_length": (f"{round(float(intro_bars),1)} bars ({int(round(float(intro_bars*4)))} beats)"
@@ -478,17 +458,14 @@ def analyze_track(path: str):
         "outro_length": (f"{round(float(outro_bars),1)} bars ({int(round(float(outro_bars*4)))} beats)"
                          if tempo_bpm > 0 else None),
 
-        # Examples model / targets
-        "examples_count": ex["count"],
+        "examples_count": get_examples_summary()["count"],
         "target_intro_bars": round(tgt_intro, 1),
-        "target_outro_bars": ex["target_outro_bars"],
+        "target_outro_bars": tgt_outro,
 
-        # Verdicts
         "intro_verdict": intro_verdict,
         "outro_verdict": outro_verdict,
 
-        # Beats-to-break
-        "beats_before_break": beats_before_break,  # int or None
+        "beats_before_break": beats_before_break,
         "break_time_sec": round(break_time_sec, 3) if break_time_sec is not None else None,
         "target_beats_to_break": GREEN_TARGET_BEATS,
         "beats_to_break_status": beats_to_break_status,
@@ -500,12 +477,14 @@ def analyze_track(path: str):
 
 @app.get("/")
 def home():
-    return FileResponse("index.html")
+    if not os.path.exists(INDEX_PATH):
+        return JSONResponse({"error": "index.html not found", "path": INDEX_PATH}, status_code=500)
+    return FileResponse(INDEX_PATH)
 
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...)):
-    suffix = os.path.splitext(file.filename)[1]
-    tmp_path = f"temp_upload{suffix}"
+    suffix = os.path.splitext(file.filename)[1] or ".bin"
+    tmp_path = os.path.join(BASE_DIR, f"temp_upload{suffix}")
     try:
         with open(tmp_path, "wb") as f:
             f.write(await file.read())
@@ -518,3 +497,7 @@ async def analyze(file: UploadFile = File(...)):
             os.remove(tmp_path)
         except Exception:
             pass
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)

@@ -230,18 +230,19 @@
       if (fileInput.files && fileInput.files[0]) decodeAndDraw(fileInput.files[0]);
     });
 
-    // Analyze button -> backend call (with timeout + clear status on all paths)
+    // Analyze button -> backend call (with timeout, disable button, clear status in all paths)
     const btn = document.getElementById("btn");
     btn.onclick = async () => {
       const f = fileInput.files[0];
       if (!f) { alert("Please select a file."); return; }
 
+      btn.disabled = true;              // NEW: prevent double-clicks
       statusEl.textContent = "Analyzing…";
       report.innerHTML = "Analyzing…";
       const fd = new FormData(); fd.append("file", f);
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort("Request timed out"), 45000);
+      const timeoutId = setTimeout(() => controller.abort("Request timed out"), 90000); // NEW: 90s
 
       try {
         const res = await fetch("/analyze", { method: "POST", body: fd, signal: controller.signal });
@@ -330,12 +331,17 @@
           </div>
         `;
 
-        statusEl.textContent = ""; // clear status on success
       } catch (err) {
-        clearTimeout(timeoutId);
         console.error(err);
-        report.innerHTML = `<span class="bad"><b>Error:</b> ${String(err)}</span>`;
-        statusEl.textContent = "Analyze failed.";
+        if (String(err).includes("AbortError")) {
+          report.innerHTML = `<span class="bad"><b>Error:</b> Analysis took too long (90s). Try a WAV, or shorten the file.</span>`;
+        } else {
+          report.innerHTML = `<span class="bad"><b>Error:</b> ${String(err)}</span>`;
+        }
+      } finally {
+        clearTimeout(timeoutId);
+        statusEl.textContent = "";   // always clear status
+        btn.disabled = false;        // re-enable button
       }
     };
 
