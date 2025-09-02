@@ -204,26 +204,23 @@
             <p><span class="label">Peak:</span> <span class="value">${data.peak_dbfs} dBFS</span></p>
 
            <p><span class="label">Intro length:</span>
-           <span class="value">
-            ${data.intro_length ?? (
-            data.intro_bars != null
-            ? `${data.intro_bars} bars (${data.intro_beats ?? Math.round(data.intro_bars*4)} beats)`
-            : "?"
-            )}
-            </span>
-            <span class="label">→</span> ${verdictLabel(data.intro_verdict)}
+            <span class="value">
+             ${(data.intro_beats != null && data.intro_bars != null)
+             ? `${data.intro_beats} beats (${data.intro_bars} bars)`
+             : (data.intro_length ?? "?")}
+             </span>
+             <span class="label">→</span> ${verdictLabel(data.intro_verdict)}
             </p>
 
-<p><span class="label">Outro length:</span>
-   <span class="value">
-     ${data.outro_length ?? (
-        data.outro_bars != null
-          ? `${data.outro_bars} bars (${data.outro_beats ?? Math.round(data.outro_bars*4)} beats)`
-          : "?"
-       )}
-   </span>
-   <span class="label">→</span> ${verdictLabel(data.outro_verdict)}
-</p>
+            <p><span class="label">Outro length:</span>
+            <span class="value">
+            ${(data.outro_beats != null && data.outro_bars != null)
+            ? `${data.outro_beats} beats (${data.outro_bars} bars)`
+            : (data.outro_length ?? "?")}
+            </span>
+            <span class="label">→</span> ${verdictLabel(data.outro_verdict)}
+            </p>
+
 
 
             <p><span class="label">Target (from examples):</span>
