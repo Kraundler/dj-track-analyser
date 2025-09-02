@@ -1,65 +1,247 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8">
+  <meta charset="utf-8" />
   <title>DJ Track Analyzer</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 40px; }
-    h1 { color: #333; }
-    #report { margin-top: 20px; padding: 15px; border: 1px solid #ccc; border-radius: 5px; background: #f9f9f9; }
-    label { margin-right: 10px; }
+    :root { color-scheme: dark; }
+    body { font-family: Arial, sans-serif; margin: 32px; background: #111; color: #eee; }
+    h1 { color: #00ff88; margin-bottom: 10px; }
+    .row { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+    input[type=file], button { padding: 8px; }
+    #report { margin-top: 16px; padding: 18px; border: 1px solid #2a2a2a; border-radius: 8px; background: #1b1b1b; }
+    .label { color: #aaa; }
+    .value { color: #fff; }
+    .notes li { margin-bottom: 6px; }
+    .ok { color: #00d084; }
+    .warn { color: #ffb44d; }
+    .bad { color: #ff6a6a; }
+
+    /* Waveform */
+    .wave-wrap { margin-top: 18px; border: 1px solid #2a2a2a; border-radius: 8px; background:#0f0f0f; position: relative; }
+    #wave { width: 100%; height: 160px; display: block; }
+    .wave-meta { display:flex; justify-content: space-between; font-size: 12px; color:#aaa; padding:6px 10px; }
   </style>
 </head>
 <body>
-  <h1>DJ Track Analyzer</h1>
+  <h1>DJ Track Analyzer </h1>
 
-  <input type="file" id="file" accept=".wav,.mp3,.aiff,.flac"/>
-  <label for="mode">Mode:</label>
-  <select id="mode">
-    <option value="dj">DJ Mix Ready</option>
-    <option value="streaming">Streaming Ready</option>
-  </select>
-  <button id="btn">Analyze</button>
+  <div class="row">
+    <input type="file" id="file" accept=".wav,.mp3,.aiff,.flac" />
+    <button id="btn">Analyze</button>
+    <span id="status" class="label"></span>
+  </div>
+
+  <!-- Waveform -->
+  <div class="wave-wrap">
+    <canvas id="wave"></canvas>
+    <div class="wave-meta">
+      <span id="wave-left">0:00</span>
+      <span id="wave-right">0:00</span>
+    </div>
+  </div>
 
   <div id="report"></div>
 
   <script>
-    document.getElementById("btn").onclick = async () => {
-      const f = document.getElementById("file").files[0];
-      const mode = document.getElementById("mode").value;
-      if (!f) {
-        alert("Please select a file.");
-        return;
+    const fileInput = document.getElementById("file");
+    const canvas = document.getElementById("wave");
+    const ctx = canvas.getContext("2d");
+    const statusEl = document.getElementById("status");
+    const leftTime = document.getElementById("wave-left");
+    const rightTime = document.getElementById("wave-right");
+    const report = document.getElementById("report");
+
+    // current audio buffer info (for drawing)
+    let lastPCM = null, lastSR = 44100, lastDuration = 0;
+    // last highlight data from server
+    let highlight = null;
+
+    // helper: format time
+    function formatTime(sec) { const m = Math.floor(sec/60), s = Math.round(sec%60); return `${m}:${s.toString().padStart(2,"0")}`; }
+
+    // fit canvas to CSS pixels
+    function fitCanvasToCSS() {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.floor(rect.width * dpr);
+      canvas.height = Math.floor(rect.height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    window.addEventListener("resize", () => { if (lastPCM) drawWave(lastPCM, lastSR, lastDuration, highlight); });
+
+    function drawWave(pcm, sr, durationSec, hl) {
+      fitCanvasToCSS();
+      const W = canvas.width;
+      const H = canvas.height;
+
+      // background
+      ctx.fillStyle = "#0f0f0f";
+      ctx.fillRect(0, 0, W, H);
+
+      // center line
+      ctx.strokeStyle = "#444";
+      ctx.beginPath();
+      ctx.moveTo(0, H/2);
+      ctx.lineTo(W, H/2);
+      ctx.stroke();
+
+      // optional overlays (intro/outro)
+      if (hl && durationSec > 0) {
+        const introX2 = (hl.intro_end_sec / durationSec) * W;
+        const outroX1 = (hl.outro_start_sec / durationSec) * W;
+
+        // colors by verdict
+        const colorFor = v => v === "good" ? "rgba(0,208,132,0.25)" : v === "bad" ? "rgba(255,80,80,0.30)" : "rgba(255,180,77,0.25)";
+
+        // Intro region 0..intro_end
+        if (!isNaN(introX2) && introX2 > 0) {
+          ctx.fillStyle = colorFor(hl.intro_verdict || "warn");
+          ctx.fillRect(0, 0, introX2, H);
+        }
+        // Outro region outro_start..end
+        if (!isNaN(outroX1) && outroX1 < W) {
+          ctx.fillStyle = colorFor(hl.outro_verdict || "warn");
+          ctx.fillRect(outroX1, 0, W - outroX1, H);
+        }
       }
 
-      const fd = new FormData();
-      fd.append("file", f);
-      fd.append("mode", mode);
+      // waveform lines (off-white)
+      const columns = Math.min(2000, Math.max(400, Math.floor(W)));
+      const blockSize = Math.max(1, Math.floor(pcm.length / columns));
+      const halfH = (H * 0.9) / 2;
 
-      const res = await fetch("/analyze", { method: "POST", body: fd });
-      const data = await res.json();
+      ctx.strokeStyle = "#f5f5f5";
+      ctx.lineWidth = 1;
 
-      if (data.error) {
-        document.getElementById("report").innerText = "Error: " + data.error;
-        return;
+      for (let i = 0; i < columns; i++) {
+        const start = i * blockSize;
+        const end = Math.min(pcm.length, start + blockSize);
+        let min = 1.0, max = -1.0;
+        for (let j = start; j < end; j++) {
+          const v = pcm[j];
+          if (v < min) min = v;
+          if (v > max) max = v;
+        }
+        const x = (i / columns) * W;
+        const y1 = H/2 - max * halfH;
+        const y2 = H/2 - min * halfH;
+        ctx.beginPath();
+        ctx.moveTo(x, y1);
+        ctx.lineTo(x, y2);
+        ctx.stroke();
       }
 
-      const r = data.result;
-      const mins = Math.floor(r.duration_sec / 60);
-      const secs = Math.round(r.duration_sec % 60);
+      leftTime.textContent = "0:00";
+      rightTime.textContent = formatTime(durationSec);
+    }
 
-      document.getElementById("report").innerHTML = `
-        <h2>Analysis Report</h2>
-        <p><b>File:</b> ${data.file}</p>
-        <p><b>Mode:</b> ${data.mode === "dj" ? "DJ Mix Ready" : "Streaming Ready"}</p>
-        <p><b>Length:</b> ${mins} min ${secs} sec</p>
-        <p><b>Tempo:</b> ${r.tempo_bpm} BPM</p>
-        <p><b>Loudness:</b> ${r.loudness_lufs} LUFS</p>
-        <p><b>Peak:</b> ${r.peak_dbfs} dBFS</p>
-        <p><b>Notes:</b></p>
-        <ul>${r.dj_notes.map(n => `<li>${n}</li>`).join("")}</ul>
-      `;
+    async function decodeAndDraw(file) {
+      statusEl.textContent = "Loading waveform…";
+      try {
+        const arrayBuf = await file.arrayBuffer();
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        const ac = new AudioCtx();
+        const audioBuf = await ac.decodeAudioData(arrayBuf);
+        const ch0 = audioBuf.getChannelData(0);
+        const ch1 = audioBuf.numberOfChannels > 1 ? audioBuf.getChannelData(1) : null;
+        const mono = new Float32Array(audioBuf.length);
+        if (ch1) { for (let i=0; i<audioBuf.length; i++) mono[i]=(ch0[i]+ch1[i])*0.5; } else { mono.set(ch0); }
+        lastPCM = mono; lastSR = audioBuf.sampleRate; lastDuration = audioBuf.duration;
+        drawWave(lastPCM, lastSR, lastDuration, highlight);
+        statusEl.textContent = "";
+        if (ac.close) ac.close();
+      } catch(e) {
+        console.error(e);
+        statusEl.textContent = "Waveform preview failed.";
+      }
+    }
+
+    fileInput.addEventListener("change", () => {
+      if (fileInput.files && fileInput.files[0]) decodeAndDraw(fileInput.files[0]);
+    });
+
+    // Analyze button -> backend call
+    const btn = document.getElementById("btn");
+    btn.onclick = async () => {
+      const f = fileInput.files[0];
+      if (!f) { alert("Please select a file."); return; }
+
+      report.innerHTML = "Analyzing…";
+      const fd = new FormData(); fd.append("file", f);
+
+      try {
+        const res = await fetch("/analyze", { method: "POST", body: fd });
+        const data = await res.json();
+        if (data.error) { report.innerHTML = `<span class="bad"><b>Error:</b> ${data.error}</span>`; return; }
+
+        // store highlight info for redraw
+        highlight = {
+          intro_end_sec: data.intro_end_sec,
+          outro_start_sec: data.outro_start_sec,
+          intro_verdict: data.intro_verdict,
+          outro_verdict: data.outro_verdict
+        };
+        // redraw waveform with overlays
+        if (lastPCM) drawWave(lastPCM, lastSR, lastDuration, highlight);
+
+        const mins = Math.floor(data.duration_sec / 60);
+        const secs = Math.round(data.duration_sec % 60);
+        const notes = (data.notes && data.notes.length)
+          ? `<ul class="notes">${data.notes.map(n => `<li class="bad">${n}</li>`).join("")}</ul>`
+          : `<p class="ok">✅ No major DJ issues detected.</p>`;
+
+        const verdictLabel = v => v==="good" ? '<span class="ok">good</span>' : v==="bad" ? '<span class="bad">bad</span>' : v==="warn" ? '<span class="warn">warning</span>' : '<span class="label">unknown</span>';
+
+        report.innerHTML = `
+          <div>
+            <p><span class="label">File:</span> <span class="value">${data.file}</span></p>
+            <p><span class="label">Length:</span> <span class="value">${mins} min ${secs} sec</span></p>
+            <p><span class="label">Tempo:</span> <span class="value">${data.tempo_bpm} BPM</span>
+               <span class="label">(confidence:</span> <span class="value">${data.tempo_confidence}%</span><span class="label">)</span></p>
+            <p><span class="label">Loudness:</span> <span class="value">${data.loudness_lufs} LUFS</span></p>
+            <p><span class="label">Peak:</span> <span class="value">${data.peak_dbfs} dBFS</span></p>
+
+           <p><span class="label">Intro length:</span>
+           <span class="value">
+            ${data.intro_length ?? (
+            data.intro_bars != null
+            ? `${data.intro_bars} bars (${data.intro_beats ?? Math.round(data.intro_bars*4)} beats)`
+            : "?"
+            )}
+            </span>
+            <span class="label">→</span> ${verdictLabel(data.intro_verdict)}
+            </p>
+
+<p><span class="label">Outro length:</span>
+   <span class="value">
+     ${data.outro_length ?? (
+        data.outro_bars != null
+          ? `${data.outro_bars} bars (${data.outro_beats ?? Math.round(data.outro_bars*4)} beats)`
+          : "?"
+       )}
+   </span>
+   <span class="label">→</span> ${verdictLabel(data.outro_verdict)}
+</p>
+
+
+            <p><span class="label">Target (from examples):</span>
+               <span class="value">intro ${data.target_intro_bars ?? "?"} bars, outro ${data.target_outro_bars ?? "?"} bars</span>
+               <span class="label">(${data.examples_count} example${data.examples_count===1?"":"s"})</span></p>
+
+            <p><span class="label">Notes:</span></p>
+            ${notes}
+          </div>
+        `;
+      } catch (err) {
+        report.innerHTML = `<span class="bad"><b>Error:</b> ${err}</span>`;
+      }
     };
+
+    // initial canvas setup
+    function init() { fitCanvasToCSS(); }
+    init();
   </script>
 </body>
 </html>

@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+.DS_Store
+uploads/
+tracks/
+*.wav
+*.mp3
+*.aiff
+*.flac
