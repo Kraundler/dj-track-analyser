@@ -21,6 +21,12 @@
     .wave-wrap { margin-top: 18px; border: 1px solid #2a2a2a; border-radius: 8px; background:#0f0f0f; position: relative; }
     #wave { width: 100%; height: 160px; display: block; }
     .wave-meta { display:flex; justify-content: space-between; font-size: 12px; color:#aaa; padding:6px 10px; }
+
+    /* Small badge */
+    #breakBadge {
+      display:inline-block; padding:6px 10px; border-radius:8px;
+      background:#6b7280; color:#fff; font-weight:600; margin-left:8px;
+    }
   </style>
 </head>
 <body>
@@ -30,6 +36,7 @@
     <input type="file" id="file" accept=".wav,.mp3,.aiff,.flac" />
     <button id="btn">Analyze</button>
     <span id="status" class="label"></span>
+    <span id="breakBadge">Waiting for analysis…</span>
   </div>
 
   <!-- Waveform -->
@@ -52,29 +59,39 @@
     const rightTime = document.getElementById("wave-right");
     const report = document.getElementById("report");
 
-    // current audio buffer info (for drawing)
+    // Badge + colors
+    const breakBadge = document.getElementById("breakBadge");
+    const bbColors = { green:'#16a34a', red:'#dc2626', orange:'#f59e0b', unknown:'#6b7280' };
+
+    // Current audio buffer
     let lastPCM = null, lastSR = 44100, lastDuration = 0;
-    // last highlight data from server
+    // Server highlight
     let highlight = null;
 
     // helper: format time
     function formatTime(sec) { const m = Math.floor(sec/60), s = Math.round(sec%60); return `${m}:${s.toString().padStart(2,"0")}`; }
 
-    // fit canvas to CSS pixels
+    // Fit canvas to CSS pixels, draw in CSS units
     function fitCanvasToCSS() {
       const rect = canvas.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
-      canvas.width = Math.floor(rect.width * dpr);
-      canvas.height = Math.floor(rect.height * dpr);
+
+      const cssW = Math.floor(rect.width);
+      const cssH = Math.floor(rect.height);
+
+      canvas.width  = cssW * dpr;
+      canvas.height = cssH * dpr;
+
+      // Make 1 unit == 1 CSS pixel
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      return { dpr, cssW, cssH };
     }
 
     window.addEventListener("resize", () => { if (lastPCM) drawWave(lastPCM, lastSR, lastDuration, highlight); });
 
     function drawWave(pcm, sr, durationSec, hl) {
-      fitCanvasToCSS();
-      const W = canvas.width;
-      const H = canvas.height;
+      const { cssW: W, cssH: H } = fitCanvasToCSS(); // draw in CSS pixels
 
       // background
       ctx.fillStyle = "#0f0f0f";
@@ -87,23 +104,75 @@
       ctx.lineTo(W, H/2);
       ctx.stroke();
 
-      // optional overlays (intro/outro)
+            // overlays
       if (hl && durationSec > 0) {
-        const introX2 = (hl.intro_end_sec / durationSec) * W;
-        const outroX1 = (hl.outro_start_sec / durationSec) * W;
+        const { intro_end_sec, outro_start_sec, break_time_sec, tempo_bpm } = hl;
 
-        // colors by verdict
-        const colorFor = v => v === "good" ? "rgba(0,208,132,0.25)" : v === "bad" ? "rgba(255,80,80,0.30)" : "rgba(255,180,77,0.25)";
+        // If break & tempo are known: intro = first 128 beats (green), last 64 beats (white)
+        if (break_time_sec != null && tempo_bpm && tempo_bpm > 0) {
+          const spb = 60 / tempo_bpm;
+          const whiteStartSec = Math.max(0, break_time_sec - 64 * spb);
+          const xWhiteStart = (whiteStartSec / durationSec) * W;
+          const xBreak      = (break_time_sec / durationSec) * W;
 
-        // Intro region 0..intro_end
-        if (!isNaN(introX2) && introX2 > 0) {
-          ctx.fillStyle = colorFor(hl.intro_verdict || "warn");
-          ctx.fillRect(0, 0, introX2, H);
+          // Uniform green from start → (break - 64 beats)
+          if (!isNaN(xWhiteStart) && xWhiteStart > 0) {
+            ctx.fillStyle = "rgba(0,255,136,0.45)"; // green tint
+            ctx.fillRect(0, 0, Math.min(xWhiteStart, W), H);
+          }
+
+          // White for the last 64 beats before the break
+          if (!isNaN(xBreak) && xBreak > (xWhiteStart || 0)) {
+            ctx.fillStyle = "rgba(255,255,255,0.25)"; // white tint
+            ctx.fillRect(Math.max(0, xWhiteStart), 0, Math.min(W, xBreak) - Math.max(0, xWhiteStart), H);
+          }
+
+          // (Optional) keep outro shading
+          if (typeof outro_start_sec === "number") {
+            const outroX1 = (outro_start_sec / durationSec) * W;
+            if (!isNaN(outroX1) && outroX1 < W) {
+              const v = hl.outro_verdict || "warn";
+              const col = v === "good" ? "rgba(0,208,132,0.25)"
+                        : v === "bad"  ? "rgba(255,80,80,0.30)"
+                        :                 "rgba(255,180,77,0.25)";
+              ctx.fillStyle = col;
+              ctx.fillRect(outroX1, 0, W - outroX1, H);
+            }
+          }
+
+        } else {
+          // Fallback if break/tempo unknown: original intro/outro shading
+          const introX2 = (intro_end_sec / durationSec) * W;
+          const outroX1 = (outro_start_sec / durationSec) * W;
+          const colorFor = v => v === "good" ? "rgba(0,208,132,0.25)"
+                          : v === "bad"  ? "rgba(255,80,80,0.30)"
+                          :                "rgba(255,180,77,0.25)";
+          if (!isNaN(introX2) && introX2 > 0) {
+            ctx.fillStyle = colorFor(hl.intro_verdict || "warn");
+            ctx.fillRect(0, 0, introX2, H);
+          }
+          if (!isNaN(outroX1) && outroX1 < W) {
+            ctx.fillStyle = colorFor(hl.outro_verdict || "warn");
+            ctx.fillRect(outroX1, 0, W - outroX1, H);
+          }
         }
-        // Outro region outro_start..end
-        if (!isNaN(outroX1) && outroX1 < W) {
-          ctx.fillStyle = colorFor(hl.outro_verdict || "warn");
-          ctx.fillRect(outroX1, 0, W - outroX1, H);
+
+        // Break marker
+        if (break_time_sec != null) {
+          const x = (break_time_sec / durationSec) * W;
+          const col = bbColors[hl.beats_to_break_status || "unknown"] || bbColors.unknown;
+          ctx.save();
+          ctx.strokeStyle = col;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, H);
+          ctx.stroke();
+          ctx.restore();
+
+          ctx.fillStyle = col;
+          ctx.font = '12px sans-serif';
+          ctx.fillText('Break', x + 4, 14);
         }
       }
 
@@ -176,15 +245,22 @@
         const data = await res.json();
         if (data.error) { report.innerHTML = `<span class="bad"><b>Error:</b> ${data.error}</span>`; return; }
 
-        // store highlight info for redraw
+        // store highlight info for redraw (unchanged + NEW fields)
         highlight = {
           intro_end_sec: data.intro_end_sec,
           outro_start_sec: data.outro_start_sec,
           intro_verdict: data.intro_verdict,
-          outro_verdict: data.outro_verdict
+          outro_verdict: data.outro_verdict,
+          break_time_sec: data.break_time_sec,
+          beats_to_break_status: data.beats_to_break_status,
+          tempo_bpm: data.tempo_bpm      // needed for 64-beat window
         };
-        // redraw waveform with overlays
+
+        // redraw waveform with overlays + break marker
         if (lastPCM) drawWave(lastPCM, lastSR, lastDuration, highlight);
+
+        // update badge
+        updateBreakBadge(data);
 
         const mins = Math.floor(data.duration_sec / 60);
         const secs = Math.round(data.duration_sec % 60);
@@ -193,6 +269,11 @@
           : `<p class="ok">✅ No major DJ issues detected.</p>`;
 
         const verdictLabel = v => v==="good" ? '<span class="ok">good</span>' : v==="bad" ? '<span class="bad">bad</span>' : v==="warn" ? '<span class="warn">warning</span>' : '<span class="label">unknown</span>';
+
+        const statusDot = (s) => {
+          const col = bbColors[s || 'unknown'] || bbColors.unknown;
+          return `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${col};margin-right:6px;vertical-align:middle;"></span>`;
+        };
 
         report.innerHTML = `
           <div>
@@ -203,7 +284,7 @@
             <p><span class="label">Loudness:</span> <span class="value">${data.loudness_lufs} LUFS</span></p>
             <p><span class="label">Peak:</span> <span class="value">${data.peak_dbfs} dBFS</span></p>
 
-           <p><span class="label">Intro length:</span>
+            <p><span class="label">Intro length:</span>
             <span class="value">
              ${(data.intro_beats != null && data.intro_bars != null)
              ? `${data.intro_beats} beats (${data.intro_bars} bars)`
@@ -221,7 +302,15 @@
             <span class="label">→</span> ${verdictLabel(data.outro_verdict)}
             </p>
 
-
+            <!-- Beats before first break -->
+            <p><span class="label">Beats before first break:</span>
+              ${statusDot(data.beats_to_break_status)}
+              <span class="value">
+                ${data.beats_before_break == null
+                  ? "not detected"
+                  : `${data.beats_before_break} beats (target ${data.target_beats_to_break ?? 192}) — at ${data.break_time_sec != null ? formatTime(data.break_time_sec) : "?"}`}
+              </span>
+            </p>
 
             <p><span class="label">Target (from examples):</span>
                <span class="value">intro ${data.target_intro_bars ?? "?"} bars, outro ${data.target_outro_bars ?? "?"} bars</span>
@@ -235,6 +324,22 @@
         report.innerHTML = `<span class="bad"><b>Error:</b> ${err}</span>`;
       }
     };
+
+    // Badge updater
+    function updateBreakBadge(data){
+      const beats  = data.beats_before_break;            // int or null
+      const target = data.target_beats_to_break || 192;  // backend sends 192
+      const status = data.beats_to_break_status || 'unknown';
+      const color  = bbColors[status] || bbColors.unknown;
+
+      if (beats == null){
+        breakBadge.textContent = 'Break not detected';
+        breakBadge.style.background = bbColors.unknown;
+      } else {
+        breakBadge.textContent = `${beats} beats → target ${target}`;
+        breakBadge.style.background = color;
+      }
+    }
 
     // initial canvas setup
     function init() { fitCanvasToCSS(); }
