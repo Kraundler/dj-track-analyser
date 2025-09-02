@@ -30,7 +30,7 @@
   </style>
 </head>
 <body>
-  <h1>DJ Track Analyzer</h1>
+  <h1>DJ Track Analyzer </h1>
 
   <div class="row">
     <input type="file" id="file" accept=".wav,.mp3,.aiff,.flac" />
@@ -104,30 +104,30 @@
       ctx.lineTo(W, H/2);
       ctx.stroke();
 
-      // overlays
+            // overlays
       if (hl && durationSec > 0) {
         const { intro_end_sec, outro_start_sec, break_time_sec, tempo_bpm } = hl;
 
-        // If break & tempo are known: green until (break - 64 beats), then white window
+        // If break & tempo are known: intro = first 128 beats (green), last 64 beats (white)
         if (break_time_sec != null && tempo_bpm && tempo_bpm > 0) {
           const spb = 60 / tempo_bpm;
           const whiteStartSec = Math.max(0, break_time_sec - 64 * spb);
           const xWhiteStart = (whiteStartSec / durationSec) * W;
           const xBreak      = (break_time_sec / durationSec) * W;
 
-          // Brighter green from start → (break - 64 beats)
+          // Uniform green from start → (break - 64 beats)
           if (!isNaN(xWhiteStart) && xWhiteStart > 0) {
-            ctx.fillStyle = "rgba(0,255,136,0.45)"; // brighter green
+            ctx.fillStyle = "rgba(0,255,136,0.45)"; // green tint
             ctx.fillRect(0, 0, Math.min(xWhiteStart, W), H);
           }
 
           // White for the last 64 beats before the break
           if (!isNaN(xBreak) && xBreak > (xWhiteStart || 0)) {
-            ctx.fillStyle = "rgba(255,255,255,0.25)";
+            ctx.fillStyle = "rgba(255,255,255,0.25)"; // white tint
             ctx.fillRect(Math.max(0, xWhiteStart), 0, Math.min(W, xBreak) - Math.max(0, xWhiteStart), H);
           }
 
-          // Optional: keep outro shading
+          // (Optional) keep outro shading
           if (typeof outro_start_sec === "number") {
             const outroX1 = (outro_start_sec / durationSec) * W;
             if (!isNaN(outroX1) && outroX1 < W) {
@@ -139,6 +139,7 @@
               ctx.fillRect(outroX1, 0, W - outroX1, H);
             }
           }
+
         } else {
           // Fallback if break/tempo unknown: original intro/outro shading
           const introX2 = (intro_end_sec / durationSec) * W;
@@ -230,32 +231,21 @@
       if (fileInput.files && fileInput.files[0]) decodeAndDraw(fileInput.files[0]);
     });
 
-    // Analyze button -> backend call (with timeout + clear status on all paths)
+    // Analyze button -> backend call
     const btn = document.getElementById("btn");
     btn.onclick = async () => {
       const f = fileInput.files[0];
       if (!f) { alert("Please select a file."); return; }
 
-      statusEl.textContent = "Analyzing…";
       report.innerHTML = "Analyzing…";
       const fd = new FormData(); fd.append("file", f);
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort("Request timed out"), 45000);
-
       try {
-        const res = await fetch("/analyze", { method: "POST", body: fd, signal: controller.signal });
-        clearTimeout(timeoutId);
-
-        if (!res.ok) {
-          const bodyText = await res.text().catch(() => "");
-          throw new Error(`HTTP ${res.status} ${res.statusText}${bodyText ? " — " + bodyText : ""}`);
-        }
-
+        const res = await fetch("/analyze", { method: "POST", body: fd });
         const data = await res.json();
-        if (data.error) throw new Error(data.error);
+        if (data.error) { report.innerHTML = `<span class="bad"><b>Error:</b> ${data.error}</span>`; return; }
 
-        // store highlight info for redraw
+        // store highlight info for redraw (unchanged + NEW fields)
         highlight = {
           intro_end_sec: data.intro_end_sec,
           outro_start_sec: data.outro_start_sec,
@@ -263,7 +253,7 @@
           outro_verdict: data.outro_verdict,
           break_time_sec: data.break_time_sec,
           beats_to_break_status: data.beats_to_break_status,
-          tempo_bpm: data.tempo_bpm
+          tempo_bpm: data.tempo_bpm      // needed for 64-beat window
         };
 
         // redraw waveform with overlays + break marker
@@ -295,23 +285,24 @@
             <p><span class="label">Peak:</span> <span class="value">${data.peak_dbfs} dBFS</span></p>
 
             <p><span class="label">Intro length:</span>
-              <span class="value">
-                ${(data.intro_beats != null && data.intro_bars != null)
-                  ? `${data.intro_beats} beats (${data.intro_bars} bars)`
-                  : (data.intro_length ?? "?")}
-              </span>
-              <span class="label">→</span> ${verdictLabel(data.intro_verdict)}
+            <span class="value">
+             ${(data.intro_beats != null && data.intro_bars != null)
+             ? `${data.intro_beats} beats (${data.intro_bars} bars)`
+             : (data.intro_length ?? "?")}
+             </span>
+             <span class="label">→</span> ${verdictLabel(data.intro_verdict)}
             </p>
 
             <p><span class="label">Outro length:</span>
-              <span class="value">
-                ${(data.outro_beats != null && data.outro_bars != null)
-                  ? `${data.outro_beats} beats (${data.outro_bars} bars)`
-                  : (data.outro_length ?? "?")}
-              </span>
-              <span class="label">→</span> ${verdictLabel(data.outro_verdict)}
+            <span class="value">
+            ${(data.outro_beats != null && data.outro_bars != null)
+            ? `${data.outro_beats} beats (${data.outro_bars} bars)`
+            : (data.outro_length ?? "?")}
+            </span>
+            <span class="label">→</span> ${verdictLabel(data.outro_verdict)}
             </p>
 
+            <!-- Beats before first break -->
             <p><span class="label">Beats before first break:</span>
               ${statusDot(data.beats_to_break_status)}
               <span class="value">
@@ -329,13 +320,8 @@
             ${notes}
           </div>
         `;
-
-        statusEl.textContent = ""; // clear status on success
       } catch (err) {
-        clearTimeout(timeoutId);
-        console.error(err);
-        report.innerHTML = `<span class="bad"><b>Error:</b> ${String(err)}</span>`;
-        statusEl.textContent = "Analyze failed.";
+        report.innerHTML = `<span class="bad"><b>Error:</b> ${err}</span>`;
       }
     };
 

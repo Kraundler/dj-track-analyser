@@ -40,7 +40,7 @@ def favicon():
 
 def load_audio_mono(path, target_sr=22050):
     """Downsampled mono load for faster analysis."""
-    y, sr = librosa.load(path, sr=target_sr, mono=True)
+    y, sr = librosa.load(path, sr=target_sr, mono=True, res_type="kaiser_fast")
     return y, sr
 
 def robust_tempo(y: np.ndarray, sr: int):
@@ -156,9 +156,10 @@ def refine_tempo_and_phase(y, sr, rough_bpm):
 
 # ===================== Beat-aware intro/outro detection =====================
 
-def detect_intro_outro(y, sr, bpm):
+def detect_intro_outro(y, sr, bpm, y_harm=None, y_perc=None):
     """
     Beat/bar-aware intro/outro detection using HPSS.
+    Accepts optional precomputed HPSS (y_harm, y_perc) to avoid recomputation.
     Returns (intro_end_sec, outro_start_sec)
     """
     duration = len(y) / sr
@@ -175,8 +176,9 @@ def detect_intro_outro(y, sr, bpm):
     beat_times = librosa.frames_to_time(beat_frames, sr=sr, hop_length=hop)
     beat_times = np.append(beat_times, duration)  # safe end boundary
 
-    # HPSS and per-beat RMS
-    y_harm, y_perc = librosa.effects.hpss(y)
+    # HPSS (use precomputed if provided)
+    if y_harm is None or y_perc is None:
+        y_harm, y_perc = librosa.effects.hpss(y)
 
     def beat_rms(sig, t0, t1):
         s0 = int(max(0, np.floor(t0 * sr)))
@@ -186,6 +188,7 @@ def detect_intro_outro(y, sr, bpm):
         seg = sig[s0:s1]
         return float(np.sqrt(np.mean(seg * seg) + 1e-12))
 
+    # Per-beat harmonic/percussive RMS
     harm_rms = []
     perc_rms = []
     for i in range(len(beat_times) - 1):
@@ -342,11 +345,14 @@ def analyze_track(path: str):
     tempo_bpm_raw, tempo_conf = robust_tempo(y, sr)
     tempo_bpm, beat_phase_sec = refine_tempo_and_phase(y, sr, tempo_bpm_raw)
 
+    # Precompute HPSS once (big speed win)
+    y_h, y_p = librosa.effects.hpss(y)
+
     meter = pyln.Meter(sr)
     loudness = float(meter.integrated_loudness(y))
     peak_dbfs = float(20 * np.log10(max(1e-12, np.max(np.abs(y)))))
 
-    intro_end_sec, outro_start_sec = detect_intro_outro(y, sr, tempo_bpm)
+    intro_end_sec, outro_start_sec = detect_intro_outro(y, sr, tempo_bpm, y_harm=y_h, y_perc=y_p)
     intro_bars = seconds_to_bars(intro_end_sec, tempo_bpm)
     outro_bars = seconds_to_bars(max(0.0, duration - outro_start_sec), tempo_bpm)
 
@@ -375,9 +381,6 @@ def analyze_track(path: str):
         if tempo_bpm > 0:
             # Use refined grid (BPM + phase) so counting is exact
             spb = 60.0 / float(tempo_bpm)
-
-            # HPSS to check drum pullback
-            _, y_p = librosa.effects.hpss(y)
 
             def seg_rms_db(sig, t0, t1):
                 s0 = max(0, int(t0 * sr))
